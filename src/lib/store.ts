@@ -25,6 +25,31 @@ import type {
 import { resolveAll } from "./resolve-song";
 import { normalizeSongName } from "./normalize";
 import { addToHistory, mergeVersions } from "./versions";
+import { publishProgram, pushItemTone, pushLive, type RemoteSnapshot } from "./remote";
+
+function uuid(): string {
+  const c = (globalThis as { crypto?: Crypto }).crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
+    const r = (Math.random() * 16) | 0;
+    return (ch === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
+function rehearsalsFor(items: ProgramItem[], prev: RehearsalItem[] = []): RehearsalItem[] {
+  return items.map((item) => {
+    const old = prev.find((r) => r.id === `r-${item.id}`);
+    return {
+      id: `r-${item.id}`,
+      songId: item.songId,
+      solo: item.solo,
+      tomOriginal: old?.tomOriginal ?? null,
+      tomEnsaio: old?.tomEnsaio ?? item.tone ?? null,
+      tomAprovado: item.status === "APROVADO" ? item.tone ?? null : old?.tomAprovado ?? null,
+      status: item.status,
+    };
+  });
+}
 
 /** Local (instant) versions for a matched repertoire song: learned + history. */
 function localVersions(song?: Song) {
@@ -47,6 +72,10 @@ interface AppState {
   pendingParsed: ResolvedProgramItem[] | null;
   /** normalized parsed name → repertoire song id (learned from user picks). */
   learnedMatches: Record<string, string>;
+  /** Remote sync: program confirmed locally but not yet published to Supabase. */
+  unpublished: boolean;
+  /** True while a publish is in flight (remote snapshots are ignored meanwhile). */
+  publishing: boolean;
 
   getSong: (id: string) => Song | undefined;
   getProgramItem: (id: string) => ProgramItem | undefined;
@@ -74,6 +103,11 @@ interface AppState {
   /** Minister picks the official version for this program item. */
   chooseVersion: (position: number, versionId: string | null) => void;
   confirmParsedProgram: () => void;
+  /** Publish current program to Supabase (no-op without env). */
+  publishCurrent: () => Promise<boolean>;
+  /** Replace local program/songs/live/notices with the remote snapshot. */
+  applyRemote: (snap: RemoteSnapshot) => void;
+  applyRemoteLive: (live: LiveSession, programId: string | null) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -87,6 +121,8 @@ export const useAppStore = create<AppState>()(
       ministerAuthed: false,
       pendingParsed: null,
       learnedMatches: {},
+      unpublished: false,
+      publishing: false,
 
       getSong: (id) => get().songs.find((s) => s.id === id),
 
@@ -114,21 +150,21 @@ export const useAppStore = create<AppState>()(
         return ok;
       },
 
-      callNow: (itemId) =>
-        set({
-          live: {
-            isLive: true,
-            currentItemId: itemId,
-            startedAt: new Date().toISOString(),
-          },
-        }),
+      callNow: (itemId) => {
+        const live = { isLive: true, currentItemId: itemId, startedAt: new Date().toISOString() };
+        set({ live });
+        // Every phone (Culto ao Vivo) follows the minister's CHAMAR AGORA.
+        void pushLive(get().program.id, live);
+      },
 
-      endLive: () =>
-        set({
-          live: { isLive: false, currentItemId: null, startedAt: null },
-        }),
+      endLive: () => {
+        const live = { isLive: false, currentItemId: null, startedAt: null };
+        set({ live });
+        void pushLive(get().program.id, live);
+      },
 
-      approveTone: (rehearsalId, tone) =>
+      approveTone: (rehearsalId, tone) => {
+        const reh = get().rehearsals.find((r) => r.id === rehearsalId);
         set((state) => ({
           rehearsals: state.rehearsals.map((r) =>
             r.id === rehearsalId
@@ -152,7 +188,13 @@ export const useAppStore = create<AppState>()(
               };
             }),
           },
-        })),
+        }));
+        if (reh) {
+          for (const item of get().program.items) {
+            if (item.songId === reh.songId) void pushItemTone(item.id, tone || null, "APROVADO");
+          }
+        }
+      },
 
       setRehearsalStatus: (rehearsalId, status, tomEnsaio) =>
         set((state) => ({
@@ -328,7 +370,7 @@ export const useAppStore = create<AppState>()(
 
           const song = songs[songIdx];
           return {
-            id: `pi-new-${stamp}-${idx}`,
+            id: uuid(),
             songId: song.id,
             position: p.position || idx + 1,
             solo: p.solo,
@@ -341,21 +383,14 @@ export const useAppStore = create<AppState>()(
           };
         });
 
-        const rehearsals: RehearsalItem[] = items.map((item) => ({
-          id: `r-${item.id}`,
-          songId: item.songId,
-          solo: item.solo,
-          tomOriginal: null,
-          tomEnsaio: null,
-          tomAprovado: null,
-          status: "PENDENTE",
-        }));
+        const rehearsals: RehearsalItem[] = rehearsalsFor(items);
 
         set({
           songs,
+          unpublished: true,
           program: {
             ...get().program,
-            id: `p-${stamp}`,
+            id: uuid(),
             title: "Nova Programação",
             items,
           },
@@ -363,6 +398,42 @@ export const useAppStore = create<AppState>()(
           pendingParsed: null,
           live: { isLive: false, currentItemId: null, startedAt: null },
         });
+        void get().publishCurrent();
+      },
+
+      publishCurrent: async () => {
+        const { program, songs } = get();
+        set({ publishing: true });
+        try {
+          const ok = await publishProgram(program, songs);
+          // Only clear the flag if the program wasn't replaced meanwhile.
+          if (ok && get().program.id === program.id) set({ unpublished: false });
+          return ok;
+        } catch {
+          return false;
+        } finally {
+          set({ publishing: false });
+        }
+      },
+
+      applyRemote: (snap) => {
+        const st = get();
+        if (st.publishing || st.unpublished) return; // local unpublished work wins
+        const sameProgram = st.program.id === snap.program.id;
+        set({
+          songs: snap.songs,
+          program: snap.program,
+          rehearsals: rehearsalsFor(snap.program.items, sameProgram ? st.rehearsals : []),
+          live: snap.live ?? (sameProgram ? st.live : { isLive: false, currentItemId: null, startedAt: null }),
+          ...(snap.notices ? { notices: snap.notices } : {}),
+        });
+      },
+
+      applyRemoteLive: (live, programId) => {
+        if (programId && programId !== get().program.id) return;
+        const cur = get().live;
+        if (cur.isLive === live.isLive && cur.currentItemId === live.currentItemId) return;
+        set({ live });
       },
     }),
     {
@@ -374,6 +445,7 @@ export const useAppStore = create<AppState>()(
         live: state.live,
         ministerAuthed: state.ministerAuthed,
         learnedMatches: state.learnedMatches,
+        unpublished: state.unpublished,
       }),
     }
   )

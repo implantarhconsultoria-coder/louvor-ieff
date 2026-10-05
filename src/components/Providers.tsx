@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { SyncBridge } from "./SyncBridge";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
@@ -20,5 +21,10 @@ export function Providers({ children }: { children: React.ReactNode }) {
     );
   }
 
-  return <>{children}</>;
+  return (
+    <>
+      <SyncBridge />
+      {children}
+    </>
+  );
 }

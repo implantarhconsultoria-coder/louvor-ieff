@@ -79,8 +79,23 @@ Ao confirmar, a versão escolhida é gravada em `programItem.chosenVersion` (tra
 e aprendida na música. Música, Ouvir, Referência, Cifra Club e Culto ao Vivo usam
 `getSongLinks(song, programItem.chosenVersion)` → todos abrem a mesma gravação.
 
-> Os dados ficam no navegador (Zustand/localStorage). Para que **todos os aparelhos**
-> vejam a mesma programação/versão, é preciso sincronizar com um backend (ex.: Supabase).
+## Sincronização entre celulares (Supabase)
+
+Projeto **Igreja Filhos da Fé** (`jeejflpysokqlumwdzle`), tabelas próprias `louvor_*`
+(não altera as tabelas do site): `louvor_songs`, `louvor_programs`,
+`louvor_program_items` (`chosen_version` = versão oficial travada), `louvor_live_session`
+(linha única: CHAMAR AGORA), `louvor_notices`. Migrações: `louvor_schema`,
+`louvor_rls_policies`, `louvor_realtime`.
+
+- **Confirmar programação** → publica músicas + programa + itens (com versão escolhida).
+- **Ao abrir o app** → carrega a última programação publicada (remoto vence o local).
+- **Chamar agora / Encerrar** → atualiza `louvor_live_session`; todos os celulares recebem
+  via Realtime (fallback: polling 8 s ao vivo / 60 s completo).
+- Sem `NEXT_PUBLIC_SUPABASE_*` → continua só com localStorage.
+
+**RLS (fase 1):** leitura pública; escrita (insert/update, sem delete) liberada com a anon key
+para o celular do ministro publicar. **TODO fase 2:** exigir login do ministro (Supabase Auth +
+papel em `profiles`) para escrever.
 
 ## Testes
 
