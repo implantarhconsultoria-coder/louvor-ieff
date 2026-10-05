@@ -64,7 +64,8 @@ async function searchSpotify(name: string, artist?: string | null): Promise<Spot
   const token = await getSpotifyToken();
   if (!token) return null;
   const q = artist ? `track:${name} artist:${artist}` : `track:${name}`;
-  const url = `https://api.spotify.com/v1/search?type=track&market=BR&limit=10&q=${encodeURIComponent(q)}`;
+  const params = new URLSearchParams({ q, type: "track", market: "BR", limit: "10" });
+  const url = `https://api.spotify.com/v1/search?${params.toString()}`;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
   if (!res.ok) return null;
   const json = (await res.json()) as { tracks?: { items: SpotifyTrack[] } };
@@ -111,7 +112,13 @@ async function searchSpotify(name: string, artist?: string | null): Promise<Spot
 async function spotifyVersions(name: string): Promise<SongVersion[] | null> {
   const token = await getSpotifyToken();
   if (!token) return null;
-  const url = `https://api.spotify.com/v1/search?type=track&market=BR&limit=20&q=${encodeURIComponent(`track:${name}`)}`;
+  const params = new URLSearchParams({
+    q: `track:${name}`,
+    type: "track",
+    market: "BR",
+    limit: "10",
+  });
+  const url = `https://api.spotify.com/v1/search?${params.toString()}`;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
   if (!res.ok) return null;
   const json = (await res.json()) as { tracks?: { items: SpotifyTrack[] } };
@@ -240,10 +247,11 @@ export async function GET(req: Request) {
   if (!name) return NextResponse.json({ configured, error: "name required" }, { status: 400 });
 
   const safe = <T,>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
+  const tokenOk = configured.spotify ? Boolean(await getSpotifyToken()) : false;
   const [spotify, youtube, spVersions] = await Promise.all([
-    configured.spotify ? safe(searchSpotify(name, artist), null) : Promise.resolve(null),
+    configured.spotify && tokenOk ? safe(searchSpotify(name, artist), null) : Promise.resolve(null),
     configured.youtube ? safe(searchYoutube(name, artist), null) : Promise.resolve(null),
-    configured.spotify ? safe(spotifyVersions(name), null) : Promise.resolve(null),
+    configured.spotify && tokenOk ? safe(spotifyVersions(name), null) : Promise.resolve(null),
   ]);
   let versions: SongVersion[] = spVersions ?? [];
   let versionsError = false;
