@@ -65,6 +65,23 @@ linhas em branco, emojis e despedidas são ignorados.
 
 Rota: `GET /api/song-refs?name=...&artist=...`. Veja `.env.example`.
 
+### Versão oficial por culto ("todos ouvirão esta")
+
+Na revisão, cada música mostra **até 3 versões mais usadas** para o ministro escolher:
+
+1. Escolha anterior da igreja (`song.defaultChoice.version`) — já vem marcada
+2. Versões usadas em cultos anteriores (`song.versionHistory`)
+3. Catálogo: Spotify Web API (popularidade) se houver chaves; senão iTunes Search API
+   da Apple (pública, sem chave) — artistas distintos, prioriza gospel e quem tem mais
+   gravações do título; exclui playback/cover/remix/medley. Nunca inventa.
+
+Ao confirmar, a versão escolhida é gravada em `programItem.chosenVersion` (trava do culto)
+e aprendida na música. Música, Ouvir, Referência, Cifra Club e Culto ao Vivo usam
+`getSongLinks(song, programItem.chosenVersion)` → todos abrem a mesma gravação.
+
+> Os dados ficam no navegador (Zustand/localStorage). Para que **todos os aparelhos**
+> vejam a mesma programação/versão, é preciso sincronizar com um backend (ex.: Supabase).
+
 ## Testes
 
 ```bash

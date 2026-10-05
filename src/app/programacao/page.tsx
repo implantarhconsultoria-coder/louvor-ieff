@@ -16,7 +16,7 @@ import { useAppStore } from "@/lib/store";
 import { parseProgramacaoMessage } from "@/lib/parse-programacao";
 import { displayTone } from "@/lib/utils";
 import { getSongLinks } from "@/lib/song-links";
-import type { ResolvedProgramItem } from "@/lib/types";
+import type { ResolvedProgramItem, SongVersion } from "@/lib/types";
 
 type Mode = "list" | "paste" | "review";
 
@@ -29,6 +29,8 @@ export default function ProgramacaoPage() {
   const confirmParsedProgram = useAppStore((s) => s.confirmParsedProgram);
   const chooseCandidate = useAppStore((s) => s.chooseCandidate);
   const enrichPending = useAppStore((s) => s.enrichPending);
+  const setVersions = useAppStore((s) => s.setVersions);
+  const chooseVersion = useAppStore((s) => s.chooseVersion);
 
   const [mode, setMode] = useState<Mode>("list");
   const [raw, setRaw] = useState("");
@@ -36,40 +38,40 @@ export default function ProgramacaoPage() {
 
   const items = [...program.items].sort((a, b) => a.position - b.position);
 
-  // Enrich pending items with official Spotify/YouTube data when API keys exist.
-  // Without keys the route answers configured:false and search links are kept.
-  const enrichedKey = useRef<string>("");
+  // For each pending item fetch (once per name) the up-to-3 versions + optional
+  // Spotify/YouTube enrichment. Results for a stale name are ignored by the store.
+  const requested = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (mode !== "review" || !pendingParsed?.length) return;
-    const key = pendingParsed.map((p) => `${p.position}:${p.rawName}:${p.selectedCandidateId ?? ""}`).join("|");
-    if (enrichedKey.current === key) return;
-    enrichedKey.current = key;
-    let cancelled = false;
+    const todo = pendingParsed.filter((p) => !requested.current.has(`${p.position}|${p.name}`));
+    if (!todo.length) return;
+    todo.forEach((p) => requested.current.add(`${p.position}|${p.name}`));
     (async () => {
-      for (const p of pendingParsed) {
-        if (cancelled) return;
-        if (p.matchStatus === "ambiguous" && !p.selectedCandidateId) continue;
+      for (const p of todo) {
         const song = p.matchedSongId ? getSong(p.matchedSongId) : undefined;
-        if (song?.spotify?.trackId) continue;
         try {
           const qs = new URLSearchParams({ name: p.name });
           if (song?.artist) qs.set("artist", song.artist);
           const res = await fetch(`/api/song-refs?${qs.toString()}`);
-          if (!res.ok) continue;
-          const data = await res.json();
-          if (!data.configured?.spotify && !data.configured?.youtube) return;
-          if (data.spotify || data.youtube) {
+          const data = res.ok ? await res.json() : {};
+          const canEnrich = !(p.matchStatus === "ambiguous" && !p.selectedCandidateId) && !song?.spotify?.trackId;
+          if (canEnrich && (data.spotify || data.youtube)) {
             enrichPending(p.position, { spotify: data.spotify, youtube: data.youtube ?? undefined });
           }
+          let versions = Array.isArray(data.versions) ? data.versions : [];
+          if (data.versionsError && !versions.length) {
+            // Catalog rate-limited: one delayed retry before giving up.
+            await new Promise((r) => setTimeout(r, 2000));
+            const retry: { versions?: SongVersion[] } = await fetch(`/api/song-refs?${qs.toString()}`).then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
+            versions = Array.isArray(retry.versions) ? retry.versions : [];
+          }
+          setVersions(p.position, versions, p.name);
         } catch {
-          return;
+          setVersions(p.position, [], p.name);
         }
       }
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, [mode, pendingParsed, getSong, enrichPending]);
+  }, [mode, pendingParsed, getSong, enrichPending, setVersions]);
 
   const handleParse = () => {
     const parsed = parseProgramacaoMessage(raw);
@@ -78,6 +80,7 @@ export default function ProgramacaoPage() {
       return;
     }
     setError("");
+    requested.current.clear();
     setPendingParsed(parsed);
     setMode("review");
   };
@@ -190,7 +193,7 @@ export default function ProgramacaoPage() {
                           <div className="mt-2 flex gap-3 text-[10px] text-zinc-600">
                             {song ? (
                               <a
-                                href={getSongLinks(song).spotifyUrl}
+                                href={getSongLinks(song, item.chosenVersion).spotifyUrl}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="flex items-center gap-1 text-zinc-500 hover:text-neon-purple"
@@ -210,7 +213,7 @@ export default function ProgramacaoPage() {
                             </Link>
                             {song ? (
                               <a
-                                href={getSongLinks(song).mainReference}
+                                href={getSongLinks(song, item.chosenVersion).mainReference}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="text-zinc-500 hover:text-neon-purple"
@@ -298,6 +301,7 @@ export default function ProgramacaoPage() {
                   <ReviewStatus
                     item={p}
                     onChoose={(songId) => chooseCandidate(p.position, songId)}
+                    onChooseVersion={(versionId) => chooseVersion(p.position, versionId)}
                   />
                 </div>
               ))}
@@ -334,14 +338,114 @@ function LinkBadge({ label, href, linked }: { label: string; href: string; linke
   );
 }
 
+function versionTag(v: SongVersion, idx: number, versions: SongVersion[]): string {
+  if (v.source === "learned") return "Escolha anterior";
+  if (v.source === "history") return "Já usada";
+  const firstApi = versions.findIndex((x) => x.source !== "learned" && x.source !== "history");
+  return idx === firstApi ? "Mais usada" : "";
+}
+
+function VersionPicker({
+  item,
+  onChooseVersion,
+}: {
+  item: ResolvedProgramItem;
+  onChooseVersion: (versionId: string | null) => void;
+}) {
+  const versions = item.versions ?? [];
+  const loading = item.versionsFor !== item.name;
+  if (!versions.length) {
+    return loading ? <p className="text-[11px] text-zinc-500">Buscando versões…</p> : null;
+  }
+  return (
+    <div>
+      <p className="text-[11px] text-violet-300">Escolha a versão oficial (todos ouvirão esta)</p>
+      <div role="radiogroup" className="mt-1.5 space-y-1.5">
+        {versions.map((v, idx) => {
+          const selected = item.selectedVersionId === v.id;
+          const tag = versionTag(v, idx, versions);
+          return (
+            <div
+              key={v.id}
+              role="radio"
+              aria-checked={selected}
+              tabIndex={0}
+              onClick={() => onChooseVersion(selected ? null : v.id)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onChooseVersion(selected ? null : v.id);
+                }
+              }}
+              className={`flex cursor-pointer items-center gap-2.5 rounded-xl border px-2.5 py-2 ${
+                selected
+                  ? "border-neon-purple/50 bg-neon-purple/20"
+                  : "border-white/10 bg-white/5"
+              }`}
+            >
+              <span
+                className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border ${
+                  selected ? "border-neon-purple" : "border-zinc-600"
+                }`}
+              >
+                {selected && <span className="h-1.5 w-1.5 rounded-full bg-neon-purple" />}
+              </span>
+              {v.artwork ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={v.artwork} alt="" className="h-9 w-9 shrink-0 rounded-md object-cover" />
+              ) : (
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-black/40">
+                  <Music2 className="h-3.5 w-3.5 text-zinc-500" />
+                </span>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-semibold text-white">{v.artist}</p>
+                <p className="truncate text-[10px] text-zinc-500">
+                  {v.title}
+                  {v.album ? ` · ${v.album}` : ""}
+                </p>
+              </div>
+              <div className="flex shrink-0 flex-col items-end gap-0.5">
+                {tag && (
+                  <span className="text-[9px] font-semibold uppercase tracking-wide text-violet-300">
+                    {tag}
+                  </span>
+                )}
+                <a
+                  href={v.spotifyUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="text-[10px] text-zinc-400 hover:text-neon-purple"
+                >
+                  {v.spotifyTrackId ? "✓ Spotify ▶" : "Spotify ▶"}
+                </a>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ReviewStatus({
   item,
   onChoose,
+  onChooseVersion,
 }: {
   item: ResolvedProgramItem;
   onChoose: (songId: string | null) => void;
+  onChooseVersion: (versionId: string | null) => void;
 }) {
-  const refs = item.externalRefs;
+  const chosen = item.versions?.find((v) => v.id === item.selectedVersionId) ?? null;
+  const refs = chosen
+    ? {
+        spotify: chosen.spotifyUrl,
+        youtube: { ...item.externalRefs.youtube, oficial: chosen.youtubeUrl ?? item.externalRefs.youtube.oficial },
+        cifraClub: chosen.cifraClubUrl ?? item.externalRefs.cifraClub,
+      }
+    : item.externalRefs;
   const ytMain = refs.youtube.oficial ?? refs.youtube.ao_vivo ?? "";
   const isAmbiguous = item.matchStatus === "ambiguous";
   const picked = item.selectedCandidateId;
@@ -384,8 +488,13 @@ function ReviewStatus({
       ) : (
         <p className="text-[11px] text-amber-300">⚠ Nova no repertório · referências encontradas</p>
       )}
+      <VersionPicker item={item} onChooseVersion={onChooseVersion} />
       <div className="flex flex-wrap gap-1.5">
-        <LinkBadge label="Spotify" href={refs.spotify} linked={Boolean(item.spotifyInfo?.trackId)} />
+        <LinkBadge
+          label="Spotify"
+          href={refs.spotify}
+          linked={chosen ? Boolean(chosen.spotifyTrackId) : Boolean(item.spotifyInfo?.trackId)}
+        />
         <LinkBadge label="YouTube" href={ytMain} linked={!isSearchUrl(ytMain)} />
         <LinkBadge label="Cifra Club" href={refs.cifraClub} linked={!isSearchUrl(refs.cifraClub)} />
       </div>

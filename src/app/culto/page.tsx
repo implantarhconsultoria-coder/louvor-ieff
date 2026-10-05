@@ -84,6 +84,16 @@ export default function CultoPage() {
                   <h2 className="mt-4 text-4xl font-black leading-tight tracking-tight text-white drop-shadow-lg">
                     {currentSong.name}
                   </h2>
+                  {current.chosenVersion && (
+                    <a
+                      href={current.chosenVersion.spotifyUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-2 block text-sm text-zinc-400"
+                    >
+                      {current.chosenVersion.artist} · Spotify ▶
+                    </a>
+                  )}
                   <div className="mt-6 flex flex-col items-center gap-2">
                     <div className="flex items-center gap-2 text-zinc-300">
                       <Mic className="h-4 w-4 text-neon-cyan" />

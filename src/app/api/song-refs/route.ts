@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 import { similarity, normalizeSongName } from "@/lib/normalize";
-import type { SpotifyInfo, YoutubeRole } from "@/lib/types";
+import type { SongVersion, SpotifyInfo, YoutubeRole } from "@/lib/types";
+import {
+  MAX_VERSIONS,
+  baseTitle,
+  rankCatalogVersions,
+  type CatalogTrack,
+} from "@/lib/versions";
+import { youtubeSearchUrl, cifraClubSearchUrl } from "@/lib/external-links";
 
 /**
  * Enriches a song with official Spotify / YouTube data when API keys exist.
@@ -10,6 +17,10 @@ import type { SpotifyInfo, YoutubeRole } from "@/lib/types";
  *   YOUTUBE_API_KEY                           → YouTube Data API v3
  * Without keys this returns { configured: false } and the app keeps using
  * generated search URLs (fully functional, just not deep-linked).
+ *
+ * Versions ("3 mais usadas"): Spotify API when keys exist (popularity); otherwise
+ * Apple's public iTunes Search API (no key) for real artist/album variants,
+ * with exact-search Spotify links. Never invents artists.
  *
  * Cifra Club has no public/official API: we only ever produce a search link,
  * never fetch or copy chord content.
@@ -96,6 +107,73 @@ async function searchSpotify(name: string, artist?: string | null): Promise<Spot
   };
 }
 
+/** Spotify versions: distinct artists for the title, ranked by popularity. */
+async function spotifyVersions(name: string): Promise<SongVersion[] | null> {
+  const token = await getSpotifyToken();
+  if (!token) return null;
+  const url = `https://api.spotify.com/v1/search?type=track&market=BR&limit=20&q=${encodeURIComponent(`track:${name}`)}`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+  if (!res.ok) return null;
+  const json = (await res.json()) as { tracks?: { items: SpotifyTrack[] } };
+  const byArtist = new Map<string, { t: SpotifyTrack; count: number }>();
+  for (const t of json.tracks?.items ?? []) {
+    if (/\b(playback|instrumental|karaok|cover|remix|8d|slowed|sped up)\b/i.test(t.name)) continue;
+    if (similarity(baseTitle(t.name), name) < 0.9) continue;
+    const key = normalizeSongName(t.artists[0]?.name ?? "");
+    const g = byArtist.get(key);
+    if (!g) byArtist.set(key, { t, count: 1 });
+    else {
+      g.count += 1;
+      if (t.popularity > g.t.popularity) g.t = t;
+    }
+  }
+  return Array.from(byArtist.values())
+    .sort((a, b) => b.t.popularity - a.t.popularity || b.count - a.count)
+    .slice(0, MAX_VERSIONS)
+    .map(({ t, count }) => {
+      const artist = t.artists.map((a) => a.name).join(", ");
+      const title = baseTitle(t.name) || t.name;
+      return {
+        id: `spotify:${t.id}`,
+        title: t.name,
+        artist,
+        album: t.album.name,
+        popularity: t.popularity,
+        usageCount: count,
+        spotifyUrl: t.external_urls.spotify,
+        spotifyTrackId: t.id,
+        youtubeUrl: youtubeSearchUrl(title, "oficial", t.artists[0]?.name),
+        cifraClubUrl: cifraClubSearchUrl(title, t.artists[0]?.name),
+        appleMusicUrl: null,
+        artwork: t.album.images[0]?.url ?? null,
+        durationMs: t.duration_ms,
+        source: "spotify" as const,
+      };
+    });
+}
+
+/** Keyless fallback: Apple iTunes Search API (public catalog). Retries on rate limit. */
+async function catalogVersions(name: string): Promise<{ versions: SongVersion[]; failed: boolean }> {
+  const url = `https://itunes.apple.com/search?term=${encodeURIComponent(name)}&entity=song&country=BR&limit=50`;
+  for (const delay of [0, 500, 1500]) {
+    if (delay) await new Promise((r) => setTimeout(r, delay));
+    try {
+      const res = await fetch(url, {
+        headers: { "User-Agent": "LouvorIEFF/1.0 (+https://louvor-ieff.vercel.app)", Accept: "application/json" },
+        next: { revalidate: 86400 },
+      });
+      if (!res.ok) continue;
+      const text = (await res.text()).trim();
+      if (!text.startsWith("{")) continue;
+      const json = JSON.parse(text) as { results?: CatalogTrack[] };
+      return { versions: rankCatalogVersions(name, json.results ?? []), failed: false };
+    } catch {
+      // retry
+    }
+  }
+  return { versions: [], failed: true };
+}
+
 const YT_QUERIES: { role: YoutubeRole; suffix: string }[] = [
   { role: "oficial", suffix: "clipe oficial" },
   { role: "ao_vivo", suffix: "ao vivo" },
@@ -160,16 +238,21 @@ export async function GET(req: Request) {
     youtube: Boolean(process.env.YOUTUBE_API_KEY),
   };
   if (!name) return NextResponse.json({ configured, error: "name required" }, { status: 400 });
-  if (!configured.spotify && !configured.youtube) {
-    return NextResponse.json({ configured, spotify: null, youtube: null });
+
+  const safe = <T,>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
+  const [spotify, youtube, spVersions] = await Promise.all([
+    configured.spotify ? safe(searchSpotify(name, artist), null) : Promise.resolve(null),
+    configured.youtube ? safe(searchYoutube(name, artist), null) : Promise.resolve(null),
+    configured.spotify ? safe(spotifyVersions(name), null) : Promise.resolve(null),
+  ]);
+  let versions: SongVersion[] = spVersions ?? [];
+  let versionsError = false;
+  if (!versions.length) {
+    const cat = await catalogVersions(name);
+    versions = cat.versions;
+    versionsError = cat.failed;
   }
-  try {
-    const [spotify, youtube] = await Promise.all([
-      configured.spotify ? searchSpotify(name, artist) : Promise.resolve(null),
-      configured.youtube ? searchYoutube(name, artist) : Promise.resolve(null),
-    ]);
-    return NextResponse.json({ configured, spotify, youtube });
-  } catch {
-    return NextResponse.json({ configured, spotify: null, youtube: null });
-  }
+  const versionsSource = spVersions && spVersions.length ? "spotify" : versions.length ? "catalog" : "none";
+
+  return NextResponse.json({ configured, spotify, youtube, versions, versionsSource, versionsError });
 }

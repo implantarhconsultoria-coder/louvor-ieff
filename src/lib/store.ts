@@ -18,11 +18,24 @@ import type {
   RehearsalItem,
   ResolvedProgramItem,
   Song,
+  SongVersion,
   SpotifyInfo,
   YoutubeRole,
 } from "./types";
 import { resolveAll } from "./resolve-song";
 import { normalizeSongName } from "./normalize";
+import { addToHistory, mergeVersions } from "./versions";
+
+/** Local (instant) versions for a matched repertoire song: learned + history. */
+function localVersions(song?: Song) {
+  if (!song) return { versions: [] as SongVersion[], selected: null as string | null };
+  const versions = mergeVersions({
+    learned: song.defaultChoice?.version ?? null,
+    history: song.versionHistory ?? null,
+  });
+  const learned = versions.find((v) => v.source === "learned");
+  return { versions, selected: learned?.id ?? null };
+}
 
 interface AppState {
   songs: Song[];
@@ -56,6 +69,10 @@ interface AppState {
     position: number,
     data: { spotify?: SpotifyInfo | null; youtube?: Partial<Record<YoutubeRole, string>> }
   ) => void;
+  /** Merge API versions (Spotify/catalog) with learned/history, capped at 3. */
+  setVersions: (position: number, apiVersions: SongVersion[], forName: string) => void;
+  /** Minister picks the official version for this program item. */
+  chooseVersion: (position: number, versionId: string | null) => void;
   confirmParsedProgram: () => void;
 }
 
@@ -150,12 +167,44 @@ export const useAppStore = create<AppState>()(
           ),
         })),
 
-      setPendingParsed: (items) =>
-        set({
-          pendingParsed: items
-            ? resolveAll(items, get().songs, get().learnedMatches)
-            : null,
-        }),
+      setPendingParsed: (items) => {
+        if (!items) return set({ pendingParsed: null });
+        const songs = get().songs;
+        const resolved = resolveAll(items, songs, get().learnedMatches).map((r) => {
+          const local = localVersions(songs.find((s) => s.id === r.matchedSongId));
+          return { ...r, versions: local.versions, selectedVersionId: local.selected, versionsFor: null };
+        });
+        set({ pendingParsed: resolved });
+      },
+
+      setVersions: (position, apiVersions, forName) =>
+        set((state) => ({
+          pendingParsed:
+            state.pendingParsed?.map((p) => {
+              if (p.position !== position || p.name !== forName) return p;
+              const song = state.songs.find((s) => s.id === p.matchedSongId);
+              const versions = mergeVersions({
+                learned: song?.defaultChoice?.version ?? null,
+                history: song?.versionHistory ?? null,
+                api: apiVersions,
+              });
+              const stillValid = versions.some((v) => v.id === p.selectedVersionId);
+              return {
+                ...p,
+                versions,
+                versionsFor: forName,
+                selectedVersionId: stillValid ? p.selectedVersionId ?? null : null,
+              };
+            }) ?? null,
+        })),
+
+      chooseVersion: (position, versionId) =>
+        set((state) => ({
+          pendingParsed:
+            state.pendingParsed?.map((p) =>
+              p.position === position ? { ...p, selectedVersionId: versionId } : p
+            ) ?? null,
+        })),
 
       chooseCandidate: (position, songId) =>
         set((state) => {
@@ -177,6 +226,9 @@ export const useAppStore = create<AppState>()(
                     selectedCandidateId: songId,
                     matchedSongId: songId,
                     name: song?.name ?? p.rawName,
+                    versions: localVersions(song).versions,
+                    selectedVersionId: localVersions(song).selected,
+                    versionsFor: null,
                   }
                 : p
             ),
@@ -219,6 +271,13 @@ export const useAppStore = create<AppState>()(
           }
 
           const refs = p.externalRefs;
+          const chosen = p.selectedVersionId
+            ? p.versions?.find((v) => v.id === p.selectedVersionId) ?? null
+            : null;
+          // Store the lock without the transient "learned/history" label.
+          const locked: SongVersion | null = chosen
+            ? { ...chosen, source: chosen.spotifyTrackId ? "spotify" : "catalog" }
+            : null;
           if (songIdx < 0) {
             const song: Song = {
               id: `s-new-${stamp}-${idx}`,
@@ -238,7 +297,8 @@ export const useAppStore = create<AppState>()(
               youtube: refs.youtube,
               cifraClub: refs.cifraClub,
               instruments: null,
-              defaultChoice: null,
+              defaultChoice: locked ? { version: locked } : null,
+              versionHistory: locked ? [locked] : null,
             };
             songs.push(song);
             songIdx = songs.length - 1;
@@ -254,10 +314,15 @@ export const useAppStore = create<AppState>()(
                   : p.spotifyInfo ?? s0.spotify ?? { trackId: null, url: refs.spotify, artist: null, album: null, coverUrl: null, durationMs: null },
               youtube: { ...refs.youtube, ...(s0.youtube ?? {}) },
               cifraClub: s0.cifraClub || refs.cifraClub,
-              defaultChoice:
-                p.selectedCandidateId && p.matchStatus === "ambiguous"
-                  ? { ...(s0.defaultChoice ?? {}), externalKey: normalizeSongName(p.rawName) }
-                  : s0.defaultChoice ?? null,
+              defaultChoice: {
+                ...(s0.defaultChoice ?? {}),
+                ...(p.selectedCandidateId && p.matchStatus === "ambiguous"
+                  ? { externalKey: normalizeSongName(p.rawName) }
+                  : {}),
+                // Learn the minister's pick: offered (and preselected) next time.
+                ...(locked ? { version: locked } : {}),
+              },
+              versionHistory: locked ? addToHistory(s0.versionHistory, locked) : s0.versionHistory ?? null,
             };
           }
 
@@ -271,6 +336,8 @@ export const useAppStore = create<AppState>()(
             status: "PENDENTE",
             notes: null,
             cifraStatus: song.cifraStatus,
+            // Official version for THIS program: everyone opens the same recording.
+            chosenVersion: locked,
           };
         });
 

@@ -51,8 +51,10 @@ export default function MusicaPage({ params }: { params: { id: string } }) {
     );
   }
 
-  const links = getSongLinks(song);
-  const duration = formatDuration(song.spotify?.durationMs);
+  // Program lock first: everyone in this culto hears the minister's chosen version.
+  const links = getSongLinks(song, programItem?.chosenVersion);
+  const version = links.version;
+  const duration = formatDuration(version?.durationMs ?? song.spotify?.durationMs);
 
   // Prefer the member's own instrument material first when known.
   const userRole = CURRENT_USER.instrument ?? null;
@@ -60,7 +62,11 @@ export default function MusicaPage({ params }: { params: { id: string } }) {
     ? [userRole, ...INSTRUMENT_ROLES.filter((r) => r !== userRole)]
     : INSTRUMENT_ROLES;
   const materials: { label: string; href: string; desc: string }[] = [
-    { label: "REFERÊNCIA PRINCIPAL", href: links.mainReference, desc: "YouTube" },
+    {
+      label: "REFERÊNCIA PRINCIPAL",
+      href: links.mainReference,
+      desc: version ? `YouTube · ${version.artist}` : "YouTube",
+    },
     { label: "CIFRA", href: links.cifraClubUrl, desc: "CIFRA CLUB · Abrir cifra" },
     ...orderedRoles.map((r) => ({
       label: INSTRUMENT_LABELS[r],
@@ -78,7 +84,9 @@ export default function MusicaPage({ params }: { params: { id: string } }) {
       external: true,
       desc: links.spotifyIsDirect
         ? `SPOTIFY ▶ Ouvir${duration ? ` · ${duration}` : ""}`
-        : "SPOTIFY ▶ Buscar",
+        : version
+          ? `SPOTIFY ▶ ${version.artist}`
+          : "SPOTIFY ▶ Buscar",
     },
     {
       label: "Letra",
@@ -121,11 +129,19 @@ export default function MusicaPage({ params }: { params: { id: string } }) {
             <h1 className="mt-3 text-3xl font-black leading-tight tracking-tight text-white">
               {song.name}
             </h1>
-            {song.artist && (
+            {version ? (
               <p className="mt-1 text-sm text-zinc-400">
-                {song.artist}
-                {song.spotify?.album ? ` · ${song.spotify.album}` : ""}
+                {version.artist}
+                {version.album ? ` · ${version.album}` : ""}
+                {programItem?.chosenVersion ? " · versão oficial" : ""}
               </p>
+            ) : (
+              song.artist && (
+                <p className="mt-1 text-sm text-zinc-400">
+                  {song.artist}
+                  {song.spotify?.album ? ` · ${song.spotify.album}` : ""}
+                </p>
+              )
             )}
             {programItem && (
               <div className="mt-4 flex items-center gap-2 text-sm text-zinc-300">

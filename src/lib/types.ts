@@ -32,8 +32,39 @@ export interface Song {
   cifraClub?: string | null;
   /** Per-instrument materials (url), fed from YouTube refs / user links. */
   instruments?: Partial<Record<InstrumentRole, string>> | null;
-  /** Learned default choice (e.g. preferred youtube role / external match key). */
-  defaultChoice?: { youtubeRole?: YoutubeRole; externalKey?: string } | null;
+  /** Learned default choice (preferred youtube role / match key / official version). */
+  defaultChoice?: {
+    youtubeRole?: YoutubeRole;
+    externalKey?: string;
+    /** Last version the minister chose — offered first next time. */
+    version?: SongVersion | null;
+  } | null;
+  /** Versions used in past programs (most recent first, max 5). */
+  versionHistory?: SongVersion[] | null;
+}
+
+export type VersionSource = "learned" | "history" | "spotify" | "catalog";
+
+/** One concrete recording of a song (artist/album) the whole team listens to. */
+export interface SongVersion {
+  /** "spotify:<trackId>" | "itunes:<trackId>" */
+  id: string;
+  title: string;
+  artist: string;
+  album?: string | null;
+  /** Spotify popularity 0–100 when from the API. */
+  popularity?: number | null;
+  /** How many recordings of this title the artist has in the catalog (usage proxy). */
+  usageCount?: number | null;
+  /** Primary listen link. Direct track when spotifyTrackId is set, else exact search. */
+  spotifyUrl: string;
+  spotifyTrackId?: string | null;
+  youtubeUrl?: string | null;
+  cifraClubUrl?: string | null;
+  appleMusicUrl?: string | null;
+  artwork?: string | null;
+  durationMs?: number | null;
+  source: VersionSource;
 }
 
 export type YoutubeRole =
@@ -75,6 +106,8 @@ export interface ProgramItem {
   status: ToneStatus;
   notes?: string | null;
   cifraStatus: CifraStatus;
+  /** Official version locked by the minister for THIS program — everyone uses it. */
+  chosenVersion?: SongVersion | null;
 }
 
 export interface Program {
@@ -143,4 +176,9 @@ export interface ResolvedProgramItem extends ParsedProgramItem {
   externalRefs: ExternalRefs;
   /** Enriched from API when keys exist (Spotify metadata). */
   spotifyInfo?: SpotifyInfo | null;
+  /** Up to 3 most used versions to pick the official one from. */
+  versions?: SongVersion[];
+  /** Name the versions were fetched for (refetch when it changes). */
+  versionsFor?: string | null;
+  selectedVersionId?: string | null;
 }
