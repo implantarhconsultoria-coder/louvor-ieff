@@ -8,11 +8,31 @@ import {
   FileMusic,
   Link2,
   Mic,
+  ExternalLink,
 } from "lucide-react";
 import { PageHeader } from "@/components/PageHeader";
 import { StatusBadge } from "@/components/StatusBadge";
 import { useAppStore } from "@/lib/store";
 import { displayTone } from "@/lib/utils";
+import { getSongLinks, INSTRUMENT_ROLES } from "@/lib/song-links";
+import { CURRENT_USER } from "@/lib/demo-data";
+import type { InstrumentRole } from "@/lib/types";
+
+const INSTRUMENT_LABELS: Record<InstrumentRole, string> = {
+  bateria: "BATERIA",
+  baixo: "BAIXO",
+  guitarra: "GUITARRA",
+  violao: "VIOLÃO",
+  teclado: "TECLADO",
+  vocal: "VOCAL",
+  backing: "BACKING",
+};
+
+function formatDuration(ms?: number | null): string | null {
+  if (!ms) return null;
+  const total = Math.round(ms / 1000);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
 
 export default function MusicaPage({ params }: { params: { id: string } }) {
   const id = params.id;
@@ -31,18 +51,40 @@ export default function MusicaPage({ params }: { params: { id: string } }) {
     );
   }
 
+  const links = getSongLinks(song);
+  const duration = formatDuration(song.spotify?.durationMs);
+
+  // Prefer the member's own instrument material first when known.
+  const userRole = CURRENT_USER.instrument ?? null;
+  const orderedRoles = userRole
+    ? [userRole, ...INSTRUMENT_ROLES.filter((r) => r !== userRole)]
+    : INSTRUMENT_ROLES;
+  const materials: { label: string; href: string; desc: string }[] = [
+    { label: "REFERÊNCIA PRINCIPAL", href: links.mainReference, desc: "YouTube" },
+    { label: "CIFRA", href: links.cifraClubUrl, desc: "CIFRA CLUB · Abrir cifra" },
+    ...orderedRoles.map((r) => ({
+      label: INSTRUMENT_LABELS[r],
+      href: links.instruments[r],
+      desc: song.instruments?.[r] ? "Material" : "YouTube · busca",
+    })),
+  ];
+
   const actions = [
     {
       label: "Ouvir",
       icon: Headphones,
-      href: song.listenUrl || "#",
-      disabled: !song.listenUrl,
-      desc: song.listenUrl ? "Abrir áudio" : "Link pendente",
+      href: links.spotifyUrl,
+      disabled: false,
+      external: true,
+      desc: links.spotifyIsDirect
+        ? `SPOTIFY ▶ Ouvir${duration ? ` · ${duration}` : ""}`
+        : "SPOTIFY ▶ Buscar",
     },
     {
       label: "Letra",
       icon: AlignLeft,
       href: "#",
+      external: false,
       disabled: !song.lyrics,
       desc: song.lyrics ? "Ver letra" : "Letra pendente",
     },
@@ -50,15 +92,17 @@ export default function MusicaPage({ params }: { params: { id: string } }) {
       label: "Cifra",
       icon: FileMusic,
       href: `/musica/${id}/cifra`,
+      external: false,
       disabled: false,
       desc: song.cifraStatus === "DISPONIVEL" ? "Abrir cifra" : "Cifra pendente",
     },
     {
       label: "Referência",
       icon: Link2,
-      href: song.reference || "#",
-      disabled: !song.reference,
-      desc: song.reference ? "Abrir ref." : "Ref. pendente",
+      href: links.mainReference,
+      external: true,
+      disabled: false,
+      desc: "Abrir ref.",
     },
   ];
 
@@ -77,6 +121,12 @@ export default function MusicaPage({ params }: { params: { id: string } }) {
             <h1 className="mt-3 text-3xl font-black leading-tight tracking-tight text-white">
               {song.name}
             </h1>
+            {song.artist && (
+              <p className="mt-1 text-sm text-zinc-400">
+                {song.artist}
+                {song.spotify?.album ? ` · ${song.spotify.album}` : ""}
+              </p>
+            )}
             {programItem && (
               <div className="mt-4 flex items-center gap-2 text-sm text-zinc-300">
                 <Mic className="h-4 w-4 text-neon-pink" />
@@ -119,12 +169,41 @@ export default function MusicaPage({ params }: { params: { id: string } }) {
             if (a.disabled || a.href === "#") {
               return <div key={a.label}>{inner}</div>;
             }
+            if (a.external) {
+              return (
+                <a key={a.label} href={a.href} target="_blank" rel="noopener noreferrer">
+                  {inner}
+                </a>
+              );
+            }
             return (
               <Link key={a.label} href={a.href}>
                 {inner}
               </Link>
             );
           })}
+        </div>
+
+        <div className="mt-5 overflow-hidden rounded-2xl border border-white/10 bg-card">
+          {materials.map((m, i) => (
+            <a
+              key={m.label}
+              href={m.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={`flex items-center justify-between gap-3 px-4 py-3 hover:bg-white/5 ${
+                i > 0 ? "border-t border-white/5" : ""
+              }`}
+            >
+              <div className="min-w-0">
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+                  {m.label}
+                </p>
+                <p className="mt-0.5 text-sm font-semibold text-white">{m.desc}</p>
+              </div>
+              <ExternalLink className="h-4 w-4 shrink-0 text-neon-purple" />
+            </a>
+          ))}
         </div>
       </div>
     </div>

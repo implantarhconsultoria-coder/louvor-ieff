@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useAppStore } from "@/lib/store";
 import { displayTone } from "@/lib/utils";
+import { getSongLinks } from "@/lib/song-links";
 
 const KEYS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
@@ -124,6 +125,14 @@ export default function CifraPage({ params }: { params: { id: string } }) {
               <p className="mt-2 max-w-xs text-sm text-zinc-500">
                 Ainda não há cifra cadastrada para esta música. Não inventamos acordes.
               </p>
+              <a
+                href={getSongLinks(song).cifraClubUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-5 rounded-full gradient-purple-pink px-4 py-2 text-[11px] font-bold uppercase tracking-wide text-white"
+              >
+                Cifra Club · Abrir cifra
+              </a>
               <p className="mt-6 text-xs text-zinc-600">
                 Tom exibido: <span className="text-zinc-400">{displayKey}</span>
                 {capo > 0 && <> · Capo {capo}</>}

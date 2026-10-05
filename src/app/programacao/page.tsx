@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -15,6 +15,8 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { useAppStore } from "@/lib/store";
 import { parseProgramacaoMessage } from "@/lib/parse-programacao";
 import { displayTone } from "@/lib/utils";
+import { getSongLinks } from "@/lib/song-links";
+import type { ResolvedProgramItem } from "@/lib/types";
 
 type Mode = "list" | "paste" | "review";
 
@@ -25,6 +27,8 @@ export default function ProgramacaoPage() {
   const pendingParsed = useAppStore((s) => s.pendingParsed);
   const setPendingParsed = useAppStore((s) => s.setPendingParsed);
   const confirmParsedProgram = useAppStore((s) => s.confirmParsedProgram);
+  const chooseCandidate = useAppStore((s) => s.chooseCandidate);
+  const enrichPending = useAppStore((s) => s.enrichPending);
 
   const [mode, setMode] = useState<Mode>("list");
   const [raw, setRaw] = useState("");
@@ -32,10 +36,45 @@ export default function ProgramacaoPage() {
 
   const items = [...program.items].sort((a, b) => a.position - b.position);
 
+  // Enrich pending items with official Spotify/YouTube data when API keys exist.
+  // Without keys the route answers configured:false and search links are kept.
+  const enrichedKey = useRef<string>("");
+  useEffect(() => {
+    if (mode !== "review" || !pendingParsed?.length) return;
+    const key = pendingParsed.map((p) => `${p.position}:${p.rawName}:${p.selectedCandidateId ?? ""}`).join("|");
+    if (enrichedKey.current === key) return;
+    enrichedKey.current = key;
+    let cancelled = false;
+    (async () => {
+      for (const p of pendingParsed) {
+        if (cancelled) return;
+        if (p.matchStatus === "ambiguous" && !p.selectedCandidateId) continue;
+        const song = p.matchedSongId ? getSong(p.matchedSongId) : undefined;
+        if (song?.spotify?.trackId) continue;
+        try {
+          const qs = new URLSearchParams({ name: p.name });
+          if (song?.artist) qs.set("artist", song.artist);
+          const res = await fetch(`/api/song-refs?${qs.toString()}`);
+          if (!res.ok) continue;
+          const data = await res.json();
+          if (!data.configured?.spotify && !data.configured?.youtube) return;
+          if (data.spotify || data.youtube) {
+            enrichPending(p.position, { spotify: data.spotify, youtube: data.youtube ?? undefined });
+          }
+        } catch {
+          return;
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, pendingParsed, getSong, enrichPending]);
+
   const handleParse = () => {
     const parsed = parseProgramacaoMessage(raw);
     if (!parsed.length) {
-      setError("Não encontrei músicas numeradas. Cole no formato: 1. Nome — Solo: Fulano");
+      setError("Não encontrei músicas na mensagem. Cole uma música por linha, ex.: Plano Melhor (Juliana)");
       return;
     }
     setError("");
@@ -149,16 +188,38 @@ export default function ProgramacaoPage() {
                             <StatusBadge status={item.cifraStatus === "DISPONIVEL" ? "DISPONIVEL" : "PENDENTE"} />
                           </div>
                           <div className="mt-2 flex gap-3 text-[10px] text-zinc-600">
-                            <span className="flex items-center gap-1 opacity-60">
-                              <Music2 className="h-3 w-3" /> Ouvir
-                            </span>
+                            {song ? (
+                              <a
+                                href={getSongLinks(song).spotifyUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-1 text-zinc-500 hover:text-neon-purple"
+                              >
+                                <Music2 className="h-3 w-3" /> Ouvir
+                              </a>
+                            ) : (
+                              <span className="flex items-center gap-1 opacity-60">
+                                <Music2 className="h-3 w-3" /> Ouvir
+                              </span>
+                            )}
                             <Link
                               href={`/musica/${item.songId}/cifra`}
                               className="flex items-center gap-1 text-zinc-500 hover:text-neon-purple"
                             >
                               <ExternalLink className="h-3 w-3" /> Cifra
                             </Link>
-                            <span className="opacity-60">Referência</span>
+                            {song ? (
+                              <a
+                                href={getSongLinks(song).mainReference}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-zinc-500 hover:text-neon-purple"
+                              >
+                                Referência
+                              </a>
+                            ) : (
+                              <span className="opacity-60">Referência</span>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -188,7 +249,7 @@ export default function ProgramacaoPage() {
                 <textarea
                   value={raw}
                   onChange={(e) => setRaw(e.target.value)}
-                  placeholder={`1. Plano Melhor — Solo: Juliana\n2. Vento do Espírito — Solo: Gabi\n3. Lugar Seguro — Solo: Juliana`}
+                  placeholder={`Boa tarde pessoal, seguem os louvores:\nPlano Melhor (Juliana)\nVento do Espírito (Gabi)\nEscolhido (Henrique-Quezia)`}
                   rows={10}
                   className="w-full resize-none rounded-xl border border-white/10 bg-black/40 p-3 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-neon-purple/50 focus:outline-none"
                 />
@@ -213,22 +274,31 @@ export default function ProgramacaoPage() {
               exit={{ opacity: 0 }}
               className="space-y-3"
             >
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+                Programação identificada
+              </p>
               <p className="text-xs text-zinc-500">
                 Confira a ordem. Tom e cifra ficam PENDENTE até o ensaio.
               </p>
               {pendingParsed.map((p) => (
                 <div
-                  key={`${p.position}-${p.name}`}
-                  className="flex items-center gap-3 rounded-xl border border-white/10 bg-card p-3"
+                  key={`${p.position}-${p.rawName}`}
+                  className="rounded-xl border border-white/10 bg-card p-3"
                 >
-                  <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-600/20 text-sm font-bold text-violet-300">
-                    {p.position}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate font-semibold text-white">{p.name}</p>
-                    <p className="text-xs text-zinc-500">Solo: {p.solo}</p>
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-600/20 text-sm font-bold text-violet-300">
+                      {p.position}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-semibold text-white">{p.name}</p>
+                      <p className="text-xs text-zinc-500">Solo: {p.solo}</p>
+                    </div>
+                    <StatusBadge status="PENDENTE" />
                   </div>
-                  <StatusBadge status="PENDENTE" />
+                  <ReviewStatus
+                    item={p}
+                    onChoose={(songId) => chooseCandidate(p.position, songId)}
+                  />
                 </div>
               ))}
               <button
@@ -241,6 +311,83 @@ export default function ProgramacaoPage() {
             </motion.div>
           )}
         </AnimatePresence>
+      </div>
+    </div>
+  );
+}
+
+function isSearchUrl(url?: string | null): boolean {
+  if (!url) return true;
+  return /\/search|results\?search_query|[?&]q=/.test(url);
+}
+
+function LinkBadge({ label, href, linked }: { label: string; href: string; linked: boolean }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="rounded-md bg-white/5 px-2 py-0.5 text-[10px] text-zinc-400 hover:text-neon-purple"
+    >
+      {linked ? <span className="font-semibold text-emerald-300">✓ {label}</span> : <>{label} · busca</>}
+    </a>
+  );
+}
+
+function ReviewStatus({
+  item,
+  onChoose,
+}: {
+  item: ResolvedProgramItem;
+  onChoose: (songId: string | null) => void;
+}) {
+  const refs = item.externalRefs;
+  const ytMain = refs.youtube.oficial ?? refs.youtube.ao_vivo ?? "";
+  const isAmbiguous = item.matchStatus === "ambiguous";
+  const picked = item.selectedCandidateId;
+
+  return (
+    <div className="mt-2 space-y-2 pl-12">
+      {isAmbiguous ? (
+        <div>
+          <p className="text-[11px] text-amber-300">
+            ⚠ Encontramos estas possíveis músicas — escolha uma:
+          </p>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {item.candidates?.map((c) => (
+              <button
+                key={c.id}
+                onClick={() => onChoose(c.id)}
+                className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold ${
+                  picked === c.id
+                    ? "border-neon-purple/50 bg-neon-purple/20 text-violet-200"
+                    : "border-white/10 bg-white/5 text-zinc-400"
+                }`}
+              >
+                {c.name}
+              </button>
+            ))}
+            <button
+              onClick={() => onChoose(null)}
+              className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold ${
+                !picked
+                  ? "border-neon-purple/50 bg-neon-purple/20 text-violet-200"
+                  : "border-white/10 bg-white/5 text-zinc-400"
+              }`}
+            >
+              Nenhuma — cadastrar como nova
+            </button>
+          </div>
+        </div>
+      ) : item.matchStatus === "found" ? (
+        <p className="text-[11px] text-emerald-300">✓ Música encontrada</p>
+      ) : (
+        <p className="text-[11px] text-amber-300">⚠ Nova no repertório · referências encontradas</p>
+      )}
+      <div className="flex flex-wrap gap-1.5">
+        <LinkBadge label="Spotify" href={refs.spotify} linked={Boolean(item.spotifyInfo?.trackId)} />
+        <LinkBadge label="YouTube" href={ytMain} linked={!isSearchUrl(ytMain)} />
+        <LinkBadge label="Cifra Club" href={refs.cifraClub} linked={!isSearchUrl(refs.cifraClub)} />
       </div>
     </div>
   );
