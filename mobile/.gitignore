@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.local
+ios/Pods/
+ios/DerivedData/
+android/.gradle/
+android/build/
+android/app/build/
+*.keystore
+*.jks
+*.p12
+*.mobileprovision
